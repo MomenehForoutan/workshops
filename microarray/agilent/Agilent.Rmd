@@ -1,0 +1,204 @@
+---
+title: "Analysis of Agilent single-channel microarrays"
+output: html_notebook
+---
+
+**Authors**: *Momeneh (Sepideh) Foroutan* and *Ramyar Molania*
+
+In this document, we explain how we can analyse microarray single-channel data from the Agilent technology. we start by downloading the data from GEO using GEOquery package. Then we normalise the data, and perform differential expression analysis using limma package.
+
+The GEO accession number of the data that we use is "GSE28569". 
+
+First, we should make sure that we have all the required libraries for our analysis. most of these packages are available through [Bioconductor](https://www.bioconductor.org). Here, we show you how to make another script that has all required packages for microarray analysis, and so instead of installing and loading them here, we just need to "source" that script before doing anything else. We name that script "RequiredPackagesMicroarryAnalysis.R".
+
+```{r}
+pkgPath<- "/Users/Sepideh/Documents/Scripts/FreqUsedScripts/"
+source(paste0(pkgPath, "RequiredPackagesMicroarrayAnanlysis.R"))
+
+# source("http://bioconductor.org/biocLite.R")
+# biocLite(c("GEOquery", "limma", "dplyr", "ggplot2", "edgeR", "RSubread", "affy", "matrixStats"))
+# #add statmod and GO.db and org.Hs.eg.db package
+# library(limma)
+
+```
+## Download and read the data
+Download the raw data and sample information.
+```{r}
+## processed data:
+gse <- getGEO("GSE28569", GSEMatrix = TRUE)
+save(gse, file="gse.RData")
+## raw data:
+GEOrawPath<- getGEOSuppFiles("GSE28569")
+
+## untar the raw data:
+untar("./GSE28569/GSE28569_RAW.tar")
+
+## sometimes sample info can be obtained through this function:
+# sampleInfo <- getGSEDataTables("GSE28569")
+```
+
+We are only interested in four samples: two controls and two TGFb treated samples. So in this chunck we read the data related to only these samples. Note that it generates an object of EListRaw class which is designed for one-colour agilent data. 
+
+The foreground and background signals for each spot can be estimated using the mean or the median of the foreground and background pixels. Background signal is ususally estimated by median signal, whereas we can change the foreground signal estimation method by setting the source parameter: "agilent" and "agilent.median" will calculate the median signal while "agilent.mean" will calculate the mean signal. In the below code, source= "agilent" is the default setting which is based on median signal for foreground.
+
+In addition to the intensity columns, the agilent file contains some annotation columns. The read.maimages() function reads the following annotation columns (if they exist): Row, Col, Start, Sequence, SwissProt, GenBank, Primate, GenPept, ProbeUID, ControlType, ProbeName, GeneName, SystematicName, Description. Here, we explicitly select the annotation columns that we care about.
+```{r}
+load("gse.RData")
+gse[[1]]
+## look at the processed data:
+head(exprs(gse[[1]]))
+
+## look at the phenotypic data:
+dim(pData(gse[[1]]))
+head(pData(gse[[1]]))
+sampleInfo<- pData(gse[[1]])
+sampleInfo<- sampleInfo[, c("source_name_ch1", "description")]
+
+## we only want to use TGFb treated and not-treated samples:
+
+pheno<- sampleInfo [ grepl("TGF", sampleInfo$description) | 
+                       grepl("WT", sampleInfo$description) , ]
+pheno$group<-  c("Control", "TGFb", "Control", "TGFb")
+
+phenoFiles<- paste0(row.names(pheno), ".txt.gz")
+
+data<- read.maimages(files = phenoFiles, source="agilent", green.only=TRUE, 
+                     annotation=c("ProbeUID", "ControlType", "ProbeName", 
+                                  "GeneName","SystematicName", "accessions"))
+```
+
+Note that the raw intensities are stored in the E component of the data object. Let's have a look at the head of the raw data.
+```{r}
+head(data$E)
+```
+We need to add gene symbols and Entrez IDs to probes. 
+```{r}
+geneInfo<- alias2SymbolUsingNCBI(data$gene$GeneName,"Homo_sapiens.gene_info")
+data$genes <- data.frame(data$genes, geneInfo)
+
+data$targets<- data.frame(data$targets, pheno)
+```
+## Data normalisation
+Now we perform background correction and normalise the data. Note that the default normalisation method for Agilent data in limma is "Saddle", however, we use "MLE" qhich is similar to Saddle.
+```{r}
+dataBGcor <-backgroundCorrect(data, method= "normexp", normexp.method="mle")
+dataNorm<-normalizeBetweenArrays(dataBGcor, method="quantile")
+```
+
+```{r}
+head(dataNorm$E)
+```
+
+We can save the expressionSet data in R using the save() function.
+```{r}
+save(dataNorm, file="agilent_normalisedData.RData")
+```
+## Quality control
+Let's look at some plots for the raw data to check the quality of the data.
+```{r}
+##-------- check to see if the data are clustered as expected:
+rawDist<- dist(t(data$E))
+plot(hclust(rawDist), labels = data$targets$group)
+
+##-------- non-metrix multi-dimensional scaling:
+par(mar=c(5,5,3,2))
+
+plotMDS(data$E, labels = data$targets$group, 
+        xlab="Dimension 1", ylab="Dimension 2", 
+        col= c("blue", "red", "blue", "red"))
+```
+Then we look at the normalised data:
+
+```{r}
+boxplot(dataNorm$E, col= c("blue", "red", "blue", "red"), 
+        ylab="log2 intensity")
+
+boxplot(dataNorm$E- rowMedians(dataNorm$E), 
+        col= c("blue", "red", "blue", "red"), 
+        range=0, ylim=c(-2, 2))
+```
+
+## Filtering
+If we want to filter the data for control probes or low-count probes, we should do this now. 
+```{r}
+## look at the table of probe types: -1 for negative controls, 0 for regular probes
+table(dataNorm$genes$ControlType)   
+
+## calculate the %95 of the intensity of negative control genes
+neg95 <- apply(dataNorm$E[dataNorm$genes$ControlType==-1,],2,function(x) quantile(x,p=0.95))
+
+## We keep probes that are at least 10% brighter than the negative controls on at least two arrays (because there are two replicates)
+cutoff <- matrix(1.1*neg95,nrow(dataNorm),ncol(dataNorm),byrow=TRUE)
+isexpr <- rowSums(dataNorm$E > cutoff) >= 2
+
+table(isexpr)
+
+## only get the regular probes that have high expression:
+dataNormFilt<- dataNorm[dataNorm$genes$ControlType==0 & isexpr,]
+```
+
+## DE analysis
+We then find genes differentially expressed in TGFb-treated samples vs. non-treated samples.
+```{r}
+## define a group vector contatining info for the four samples (in the same order as the arrays in the expression matrix)
+group<- dataNormFilt$targets$group
+
+## we can also change the refrence level:
+## group <- relevel(group, ref="...")
+
+design <- model.matrix( ~ group)
+fit <- lmFit (dataNormFilt, design)
+fit <- eBayes(fit, trend=TRUE, robust = T)
+
+## log residual standard deviation versus average log expression
+plotSA(fit, main="Probe-level")
+summary(decideTests(fit[,-1]))
+
+```
+
+Because There are more than one probe mapped to the same gene, we can summarise probe-level expression to the gene-level expression. Basically, we calculate the mean of the probes for a specific gene. Then again, we fit the model to obtain the test statistics at the level of gene.
+```{r}
+dataGene <- avereps(dataNormFilt, ID=dataNormFilt$genes[,"GeneName"])
+fitg <- lmFit(dataGene,design)
+fitg <- eBayes(fitg,trend=TRUE, robust = T)
+plotSA(fitg, main="Gene-level")
+summary(decideTests(fitg[,-1]))
+```
+Let's look at the top differentially expressed genes.
+```{r}
+toptable(fitg, coef=2)
+
+## we can also get the test statistics for all the genes by setting n="inf"
+allStats<- toptable(fitg, coef=2, n="inf", sort.by="none")
+```
+Look at the distribution of p-values
+```{r}
+hist(allStats$P.Value, breaks=100, xlab="p values", main="")
+```
+Let's look at the volcano plot.
+```{r}
+par(mfrow=c(1,2))
+## use the function available through limma:
+volcanoplot(fitg, coef=2, highlight=1, names=fit$genes$ID,
+            xlab="Log Fold Change", ylab="Log Odds", pch=16, cex=0.35)
+
+## make your own volcano plot
+plot(allStats$logFC, -log10(allStats$P.Value), 
+     cex=0.4, xlab="Log fold change", ylab="-log10(p value)")
+points(allStats$logFC[allStats$adj.P.Val<0.05 & abs(allStats$logFC)>2],
+       -log10(allStats$P.Value)[allStats$adj.P.Val<0.05 & abs(allStats$logFC)>2] ,
+       col="red", cex=0.4, pch=19)
+```
+
+Now, we extract differentially expressed gene based on our criteria.
+```{r}
+DEGs_indx<- which(allStats$adj.P.Val<0.05 & abs(allStats$logFC)>2) ## 471 genes 
+DEGs<-dataGene[DEGs_indx,]       # it has expression values for DEGs
+DEpvals<- allStats[DEGs_indx,]   # it gives p vals, logFC etc related to DEGs
+DEGs$genes<- data.frame(DEGs$genes, DEpvals)
+
+save(DEGs, file= "DEGs_stats_agilent.RData")
+```
+
+
+
