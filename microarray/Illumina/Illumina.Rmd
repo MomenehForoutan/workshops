@@ -1,0 +1,243 @@
+---
+title: "Analysis of Illumina microarray data"
+output: html_notebook
+---
+
+**Authors**: *Momeneh (Sepideh) Foroutan* and *Ramyar Molania*
+
+We are going to analyse Illumina platform "HumanWG-6 v3.0 expression beadchip" with GEO accession number "GSE20247". For Illumina, we usually have one single ".txt" file containing all the arrays in columns. It is recommended that the data are exported from the machine without any pre-processing. Intensity for control probes are usually written in a separate file, and if available, it can be read at the same time that we read Illumina probe summary file.
+
+```{r}
+pkgPath<- "/Users/Sepideh/Documents/Scripts/FreqUsedScripts/"
+source(paste0(pkgPath, "RequiredPackagesMicroarrayAnanlysis.R"))
+
+# source("http://bioconductor.org/biocLite.R")
+# biocLite(c("GEOquery", "limma", "dplyr", "ggplot2", "edgeR", "RSubread", "affy", "matrixStats"))
+# library(limma)
+
+```
+## Download and read the data
+```{r}
+## processed data and sample info:
+gse <- getGEO("GSE20247", GSEMatrix = TRUE)
+save(gse, file="gse.RData")
+## raw data:
+GEOrawPath<- getGEOSuppFiles("GSE20247")
+
+## untar the raw data:
+untar("./GSE20247/GSE20247_RAW.tar")
+gunzip("./GSE20247/GSE20247_non-normalized_Sample_Probe_Profile_BSonly.txt.gz")
+
+```
+
+Now we want to read the data. Reading the control probe profiles is optional but recommended. If the control probe profiles are available, then the Illumina data can be favorably background corrected and normalized using the neqc or nec functions.
+
+```{r}
+## Now we read the data; this is an object of class "EListRaw"
+data <- read.ilmn("./GSE20247/GSE20247_non-normalized_Sample_Probe_Profile_BSonly.txt", 
+                  probeid="ProbeID",
+                  annotation = c("ID_REF", "TargetID"))
+```
+
+Read the manifest file that has annotation related to probes. This annotation file can be downloaded from the GEO website [here]("https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GPL6884"). 
+```{r}
+gunzip("./GPL6884_HumanWG-6_V3_0_R0_11282955_A.bgx.gz")
+Manifest <- read.delim("GPL6884_HumanWG-6_V3_0_R0_11282955_A.bgx",skip=8,comment.char="",quote="",stringsAsFactors=FALSE,nrows=48804)
+```
+## Add gene and sample information 
+We need to add gene IDs (EntrezIDs) to probe annotations.
+```{r}
+## get gene Symbols in the same order as the row.names in the data:
+mIndx <- match(rownames(data), Manifest$Array_Address_Id)
+Symbol <- Manifest$Symbol[mIndx]
+
+## get gene IDs and and add that to the data:
+geneInfo<- alias2SymbolUsingNCBI(Symbol,"Homo_sapiens.gene_info")
+data$genes <- data.frame(data$genes, geneInfo)
+```
+
+Generate sampleInfo from the pData, and add a column containing groups
+```{r}
+gse[[1]]  ## normalised data: expressionSet
+## look at the processed data:
+head(exprs(gse[[1]]))
+
+## look at the phenotypic data:
+dim(pData(gse[[1]]))
+head(pData(gse[[1]]))
+
+sampleInfo<- pData(gse[[1]])
+sampleInfo<- sampleInfo[, c("title", "geo_accession")]
+
+## add a group column:
+sampleInfo$group<- gsub(c("_rep1"), c(""), sampleInfo$title)
+sampleInfo$group<- gsub(c( "_rep2"), c(""), sampleInfo$group)
+sampleInfo$group<- gsub(c( "_rep3"), c(""), sampleInfo$group)
+
+```
+
+Sample names in the expression matrix should be the same in the sampleInfo file.  
+```{r}
+head( data$E )   ## Note that expression data are stored in E object.
+colnames(data)<- row.names(sampleInfo)
+```
+## Data normalisation
+We can normalise data using neqc() function from limma package, which performs both back-ground correction (using negative control probes) and quantile normalisation (using negative and positive control probes). Note that we can do the same thing in seperate steps using nec() and normalizeBetweenArrays(). 
+Here, to do background correction and normalisation, we use necq() function, which performs:
+
+1. normexp background correction (using negative controls) 
+2. quantile normalisation (using negative and positive controls)
+3. log2 transformation
+4. removal of control probes
+```{r}
+dataNorm <- neqc(data)
+
+## If we were to use nec():
+# dataNorm <- nec(data)
+# dataNorm<- normalizeBetweenArrays(dataNorm,method="quantile")
+
+## remove targetID col as we have gene symbols and IDs
+dataNorm$genes$TargetID <- NULL
+
+## save normalised data:
+save(dataNorm, file="Illumina_normalisedData.RData")
+```
+## Filter data
+Now, we would like to remove genes with low intensities. The "Detection" values tell us if a probe in a given sample has significant expression or not. Sometimes these values are reported as p-values for intensisty, i.e. the lower the p-value is, the higher the intensity is. However, sometimes these are reported as 1- (pvalues), which is the case for our data. This can be realised by looking at the distribution of "Detection" values.
+
+```{r}
+hist(dataNorm$other$Detection, breaks=50, col="orange", xlab="Detection", main="")
+```
+We only keep probes that have Detection>0.95 (i.e. p-values less than 0.05) in at least three samples, because the min number of samples in our groups is 3.
+```{r}
+keep <- rowSums(dataNorm$other$Detection>0.95) >= 3 & !is.na(dataNorm$genes$Symbol)
+dataNormFilt <- dataNorm[keep,]
+dataNormFilt <- dataNormFilt[!is.na(dataNormFilt$genes$GeneID),]
+```
+## Quality control
+#### Quality control by looking at the boxplots and RLE plots of the samples.
+```{r}
+par(mar=c(6,3,1,1))
+par(mfrow=c(1,2))
+boxplot(log2(dataNormFilt$E),range=0,ylab="log2 intensity",
+        las=2, col="light blue")
+
+boxplot(log2(dataNormFilt$E)- rowMedians(log2(dataNormFilt$E)), 
+        las=2, ylim=c(-0.5, 0.5), col="gold", range=0)
+```
+
+#### Quality control by looking at the MDS plots
+```{r}
+cols <- c(brewer.pal(8, "Set1"), brewer.pal(8, "Set2"), brewer.pal(8, "Set3"))
+sampleInfo
+plotMDS(dataNormFilt,labels=sampleInfo$title, col=cols[as.factor(sampleInfo$group)])
+
+toPlot<- c(1:9)
+plotMDS(dataNormFilt[,toPlot],labels=sampleInfo$title[toPlot], col=cols[as.factor(sampleInfo$group[toPlot])])
+
+toPlot<- c(1:3, 7:9)
+plotMDS(dataNormFilt[,toPlot],labels=sampleInfo$title[toPlot], col=cols[as.factor(sampleInfo$group[toPlot])])
+```
+
+#### Quality control using hierarchical clustering
+```{r}
+tempDataNorm <- dataNormFilt$E
+  # change column names to be short meaningful names:
+colnames(tempDataNorm)<- sampleInfo$title
+  # calculating distance:
+dat.dist<- dist(t(tempDataNorm))
+  # hierarchical clustering:
+hc<- hclust(dat.dist)
+
+##----- simple clustering:
+plot(hc)
+```
+```{r}
+##----- or to have a bit prettier plot using packaage dendextend:
+  # make dendrogram of hc:
+par(mar=c(12,3,1,1))
+dend<- as.dendrogram(hc)
+  # choose two colors for two groups "control" and "TGFb":
+colorCodes<- cols
+  # Assigning the labels of dendrogram object with new colors:
+labels_colors(dend) <- colorCodes[as.factor(sampleInfo$group)][order.dendrogram(dend)]
+#   # Plotting the new dendrogram
+plot(dend)
+```
+Look at the correlation between the replicates.
+```{r }
+plot(dataNormFilt$E[, 13], dataNormFilt$E[,14], col="royal blue", cex=0.5)
+plot(dataNormFilt$E[, 13], dataNormFilt$E[,15], col="royal blue", cex=0.5)
+plot(dataNormFilt$E[, 14], dataNormFilt$E[,15], col="royal blue", cex=0.5)
+```
+Look at the MA plots of the replicates
+```{r}
+S13<- dataNormFilt$E[, 13]
+S14<- dataNormFilt$E[, 14]
+S15<- dataNormFilt$E[,15]
+
+plot( (S13+S14)/2, S13-S14, cex=0.3, ylim=c(-4, 3), col="dark green")
+plot( (S14+S15)/2, S14-S15, cex=0.3, ylim=c(-4, 3), col="dark green")
+```
+## DE analysis
+Now, we performe DE analysis using limma. Here, we only want to compare two groups: TGFb-48 with control-48.
+```{r}
+groups<- sampleInfo$group
+design<- model.matrix ( ~ 0 + groups)
+colnames(design)<- c("Cpep_18", "Cpep_48", "Ctrl_18", "Ctrl_48", "TGFb_48", "TGFb_Cpep_48")
+design
+
+fit<-lmFit(dataNormFilt, design)
+
+contrastMat<- makeContrasts(TGFb_ctrl_48= TGFb_48 - Ctrl_48, 
+                            levels=design)
+contrastMat
+
+fit2<- contrasts.fit(fit,contrastMat)
+fit2<- eBayes(fit2, robust = T, trend=T)
+
+summary(decideTests(fit2, method="global"))
+
+## To check the mean-variance relationship of the expression data:
+plotSA(fit2, main="Probe-level")
+
+```
+
+Let's look at the top differentially expressed probes
+```{r}
+toptable(fit2, coef=1)
+
+## we can also get the test statistics for all the genes by setting n="inf"
+allStats<- toptable(fit2, coef=1, n="inf", sort.by="none")
+```
+Look at the distribution of p-values
+```{r}
+hist(allStats$P.Value, breaks=100, xlab="p values", main="")
+```
+Generate volcano plot
+```{r}
+par(mfrow=c(1,2))
+## use the function available through limma:
+volcanoplot(fit2, coef=1, highlight=6, names=dataNormFilt$genes$Symbol,
+            xlab="Log Fold Change", ylab="Log Odds", pch=16, cex=0.35)
+
+## make your own volcano plot
+plot(allStats$logFC, -log10(allStats$P.Value),
+     cex=0.4, xlab="Log fold change", ylab="-log10(p value)")
+points(allStats$logFC[allStats$adj.P.Val<0.05 & abs(allStats$logFC)>2],
+       -log10(allStats$P.Value)[allStats$adj.P.Val<0.05 & abs(allStats$logFC)>2] ,
+       col="red", cex=0.4, pch=19)
+```
+
+Now, we extract differentially expressed probes based on our criteria.
+```{r}
+DEProbes_indx<- which(allStats$adj.P.Val<0.05 & abs(allStats$logFC)>2) ## 148 probes 
+DEProbes<-dataNormFilt[DEProbes_indx,]       # it has expression values for DEProbes
+DEpvals<- allStats[DEProbes_indx,]       # it gives p vals, logFC etc related to DEProbes
+DEProbes$genes<- data.frame(DEProbes$genes, DEpvals)
+
+save(DEProbes, file= "DEProbes_stats_Illumina.RData")
+```
+
+
+
