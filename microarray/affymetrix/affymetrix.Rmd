@@ -1,0 +1,354 @@
+---
+title: "Analysis of Affymetrix microarray data"
+output: html_notebook
+---
+
+**Authors**: *Momeneh (Sepideh) Foroutan* and *Ramyar Molania*
+
+Here we explain how we can analyse Affymetrix microarray platform. Most of the piplines generated here come from the limma and edgeR manuals. To see limma user guid, simply type "limmaUsersGuide()" in R console, which opens up a PDF file containing the manual. 
+The study that we are going to analyse includes platform "Affymetrix HT_HG-U133A" with GEO accession number "GSE24202". 
+We download the data from GEO using GEOquery package. Then we normalise the data, perform quality control, and finally differential expression analysis using limma package.In teh end, we show how we can use the list of DEGs to perform pathway and GO analysis.
+
+Note that getGEO() function from GEOquery package downloads the processed data as well as some sample information, while getGEOSuppFiles() function is defined for downloading the raw version. To know more about this package, look at [this](https://www.bioconductor.org/packages/devel/bioc/vignettes/GEOquery/inst/doc/GEOquery.html) document by Sean Davis. We start with the raw data.
+
+Note: if you get error using GEOquery, one reason might be that you have old version of some of the packages (such as curl or Rcurl). So you could update packages using update.packages() and then restart RStudio.
+
+First, we should make sure that we have all the required libraries for our analysis. Most of these packages are available through [Bioconductor](https://www.bioconductor.org). Each package has a "vignette" which contains the introductory materials; we can view that using 'browseVignettes("pkgname")' when we access the internet. To cite Bioconductor, we can use 'citation("Biobase")', and for packages we type 'citation("pkgname")'.
+
+
+```{r}
+source("http://bioconductor.org/biocLite.R")
+biocLite(c("GEOquery", "limma", "dplyr", "ggplot2", "edgeR", 
+           "Rsubread", "affy", "simpleaffy", "gcrma",
+           "affyPLM", "MASS", "genefilter",
+           "matrixStats", "statmod", "GO.db", 
+           "org.Hs.eg.db", "hthgu133a.db"))
+
+library(hthgu133a.db)
+library(annotate)
+
+library(GEOquery)    ## for downloading the data from GEO
+library(gcrma)       ## for gcrma()
+library(affy)        ## for readAffy and rma()
+library(simpleaffy)  
+library(affyPLM)     ## for visualise statistical characteristics of the CEL files, such as image, RLE, NUSE
+library(limma)       ## for DE analysis
+library(RColorBrewer)## for choosing colours
+library(dendextend)
+library(MASS)        ## for isoMDS
+library(genefilter)  ## for filtering the expression data
+library(statmod)
+library(GO.db)
+library(org.Hs.eg.db)
+
+# setwd("W:/Rdir/workshop_iran/affy/")
+
+```
+
+## Download and read data
+Here we download the raw data and sample information
+```{r}
+## processed data and sample info:
+gse <- getGEO("GSE24202", GSEMatrix = TRUE)
+save(gse, file= "gse.RData")
+
+## raw data:
+GEOrawPath<- getGEOSuppFiles("GSE24202")
+
+## untar the raw data:
+untar("./GSE24202/GSE24202_RAW.tar")
+
+```
+We can access sample information using pData() on the processed data. Then we change that to make it ready for further analysis.
+```{r}
+# load("gse.RData")
+gse[[1]]  ## the normalised data is in the format of expressionSet
+## look at the processed data:
+# head(exprs(gse[[1]]))
+
+## look at the phenotypic data:
+# dim(pData(gse[[1]]))
+# head(pData(gse[[1]]))
+sampleInfo<- pData(gse[[1]])
+sampleInfo<- sampleInfo[, c("title", "source_name_ch1")]
+
+## add a group column:
+sampleInfo$group<- c(rep("pWZL", 3), 
+                     rep("TGFb", 3), 
+                     rep("Twist", 3), 
+                     rep("Gsc", 3), 
+                     rep("Snail", 3),  
+                     rep("shGFP", 3), 
+                     rep("shEcad", 3))
+
+row.names(sampleInfo)<- paste0( row.names(sampleInfo), ".CEL.gz")
+sampleInfo
+```
+We read the CEL files into R using ReadAffy() function. This is the raw data which is an AffyBatch object. Basically, we can add sampleInfo to this object using pData() function.
+```{r}
+data<-ReadAffy() ## it reads all the CEL files in the working directory.
+# data   ## 
+
+# head(pData(data))
+pData(data)<- sampleInfo
+pData(data)
+```
+## Normalise the data
+Then we normalise data using gcrma.
+
+```{r}
+
+# affinity_hthgu133a<- compute.affinities("hthgu133a")
+# save(affinity_hthgu133a, file = "affinity_hthgu133a.RData")
+dataNorm<- gcrma(data)   ## ExpressionSet class  ## it summarises at the probe-set level.
+
+```
+Normalised expression values can be accessed through exprs() function.
+```{r}
+head(exprs(dataNorm))
+```
+
+We also want to add some annotation to the peobes, such as gene symbols and Entreaz IDs. We first get the gene Symbols for the probes using getSYMBOL() in annotate package, and then we add gene IDs using gene info file from NCBI and alias2SymbolUsingNCBI() function from limma. The gene info file has been downloaded from NCBI and should be in your working directory.
+```{r}
+geneSymbols <- getSYMBOL(row.names(dataNorm), "hthgu133a")
+geneInfo<- alias2SymbolUsingNCBI(geneSymbols,"Homo_sapiens.gene_info")
+row.names(geneInfo)<- row.names(dataNorm)
+## Add geneInfo to the expressionSet:
+fData(dataNorm)<- data.frame(geneInfo)
+```
+
+We can save the expressionSet data in R using the save() function.
+```{r}
+save(dataNorm, file="affy_gcRMAnormalisedData.RData")
+```
+
+## Quality control
+In the next few sections we perform quality control to make sure that the data are of high quality.
+
+#### Quality control using boxplots
+```{r}
+cols <- c(brewer.pal(8, "Set1"), brewer.pal(8, "Set2"), brewer.pal(8, "Set3"))
+
+par(mfrow=c(1, 2), mar=c(8,3,1,1))
+##------ for the unnormalised data
+## on the whole dataset: 
+boxplot(data, col=cols, las=2, cex.axis=0.6)
+##------- for the normalised data
+# NOTE: affyPLM is required to interrogate gcrma normalised data
+boxplot(dataNorm, col=cols, las=2, cex.axis=0.6)
+```
+#### Quality control using histograms
+We look at histograms showing the density vs log intensity.
+```{r}
+par(mfrow=c(1, 2))
+## for the unnormalised data having all the arrays
+hist(data, col=cols)
+hist(dataNorm, col=cols)
+```
+
+#### Quality control using affyPLM package
+This includes image, RLE (relative log expression) and NUSE (Normalised Unscaled Standard Errors) plots.
+```{r}
+##------------------------------ Image
+# Perform probe-level metric calculations on the CEL files:
+rawQC <- fitPLM(data)
+# Look at the image of the first array:
+image(rawQC, which=1, add.legend=TRUE)
+image(rawQC, which=4, add.legend=TRUE)
+```
+```{r}
+##--------------------- RLE and NUSE plot
+par(mfrow=c(1, 2))
+## RLE should be around zero
+RLE(rawQC, main="RLE", las=2, cex.axis=0.5)
+# NUSE (Normalised Unscaled Standard Errors): The median standard error should be 1 for most genes.
+NUSE(rawQC, main="NUSE", las=2, cex.axis=0.5)
+```
+#### Quality control using RNA degredation plot
+```{r}
+RNAdeg<-AffyRNAdeg(data)
+plotAffyRNAdeg(RNAdeg, col=cols)
+legend(legend=sampleNames(data), x="topleft", lty=1, cex=0.4, col=cols)
+```
+
+#### Quality control using clustering the normalised data
+```{r}
+tempDataNorm <- exprs(dataNorm)
+  # change column names to be short meaningful names:
+colnames(tempDataNorm)<- pData(data)$title
+  # calculating distance:
+dat.dist<- dist(t(tempDataNorm))
+  # hierarchical clustering:
+hc<- hclust(dat.dist)
+
+##----- simple clustering:
+plot(hc)
+```
+
+```{r}
+##----- or to have a bit prettier plot using packaage dendextend:
+par(mar=c(10, 3, 1,1))
+  # make dendrogram of hc:
+dend<- as.dendrogram(hc)
+  # Assigning the labels of dendrogram object with new colors:
+labels_colors(dend) <- cols[as.factor(pData(data)[,"group"])][order.dendrogram(dend)]
+#   # Plotting the new dendrogram
+plot(dend)
+```
+
+#### Quality control using MDS plot
+```{r}
+mds<-isoMDS(dat.dist)     
+  # plot MDS:
+plot(mds$points[,1], mds$points[,2], main="NMDS",
+     xlab="Dimension 1", ylab="Dimension 2",
+     type="n")
+  # add names of the arrays:
+  text(mds$points[,1], mds$points[,2],
+     rownames(mds$points), cex=0.75, 
+     col= cols[ as.numeric( as.factor( pData(data)$group )) ])
+  
+## OR plotting MDS using plotMDS function in limma:
+plotMDS(tempDataNorm, col=cols[ as.numeric( as.factor( pData(data)$group )) ])
+```
+
+## Filtering
+Now we filter the data; note that this will filter genes with low variance in intensities across samples as well as control probesets and other internal controls. Note that instead of the steps below, we can filter genes after normalisation based on their expression values in some proportion of samples. 
+We include a comment by Prof. Gordon Smyth about filtering taken from [here](https://stat.ethz.ch/pipermail/bioconductor/2013-May/052816.html):
+
+"The literature tends to say that the reason for filtering is to reduce the amount of multiple testing, but in truth the increase in power from this is only slight.  The more important reason for filtering in most applications is to remove highly variable genes at low intensities.  The importance of filtering is highly dependent on how you pre-processed your data.  Filtering is less important if you (i) use a good background correction or normalising method that damps down variability at low intensities and (ii) use eBayes(trend=TRUE) which accommodates a mean-variance trend."\
+Here, we use nsFilter() function from genefilter package.
+```{r}
+dataNormFilt <- nsFilter(dataNorm, require.entrez=FALSE, remove.dupEntrez=FALSE)
+## let's see how many probes have been filtered? filter.log is a list giving details of how many probe sets where removed for each filtering step performed
+dataNormFilt$filter.log 
+
+## look at the sistribution of the data afyter filtering:
+hist(exprs(dataNormFilt$eset), breaks=100, col="light blue")
+```
+
+## DE analysis
+Now, we performe DE analysis using limma. Note that in model.matrix() below, we tend to add zero to the model because we want to do multiple comparisons. If we had only two groups to compare, we could make our model matrix without 0 and so we did not need to define the contrast matrix.
+```{r}
+groups<- pData(data)$group
+design<- model.matrix ( ~ 0 + groups)
+design
+colnames(design)<- c("Gsc", "pWZL", "hEcad", "shGFP", "Snail", "TGFb", "Twist")
+
+## fit a linear model for each probe across arrays; it gives a MArrayLM object containing the result of the fits
+fit<- lmFit(dataNormFilt$eset, design)
+
+## make contrasts for the coefficients of the linear model fit
+contrastMat<- makeContrasts(TGFb_pWZL= TGFb-pWZL, 
+                            TGFb_shGFP= TGFb-shGFP, 
+                            pWZL_shGFP=pWZL-shGFP, 
+                            levels=design)
+contrastMat
+
+## Compute estimated coefficients and standard errors 
+fit2<- contrasts.fit(fit,contrastMat)
+
+## Compute moderated t-statistics using empirical Bayes method
+## robust against outliers  
+## consider intensity trend for prior variance
+fit2<- eBayes(fit2, robust = T, trend=T) 
+
+## log residual standard deviation versus average log expression
+plotSA(fit2, main="Probe-level")
+
+```
+How many genes are differentially epressed?
+
+```{r}
+results<- decideTests(fit2, method = "global")
+summary(results)
+```
+
+Look at the Venn diagram comparing DEGs between all the conditions.
+```{r}
+results <- decideTests(fit2, lfc=1)
+vennDiagram(results, include=c("up","down"), 
+            cex=c(1, 0.5, 0.3), 
+            circle.col=cols)
+```
+Look at the top DEGs. Note that we have 6 columns:
+*logFC*: Log2-based fold change between the groups. If the value is negative, it indicates down-regulation in the treatment group.
+*AveExpr*: average log2 expression for each probe across samples
+*t*: Moderated t-statistics from the empirical Bayes method.
+*B*: Log-odds that the gene is differentially expressed.
+*P.Value*: Raw p values.
+*adj.P.Val*: Corrected p values using Benjamini and Hochberg's false discovery rate.
+```{r}
+##---- note that we can change the lfc value in the function
+topTable(fit2, number=10, coef=1)
+
+allStat_TGFb_pWZL<- toptable(fit2, coef=1, n="inf", sort.by="none")
+allStat_TGFb_shGFP<- toptable(fit2, coef=2, n="inf", sort.by="none")
+allStat_pWZL_shGFP<- toptable(fit2, coef=3, n="inf", sort.by="none")
+```
+We add gene information to this probeIDs, We then make a list of these results and export them as an R object with .RData format. 
+```{r}
+allStat_TGFb_pWZL<- merge(fit2$genes, allStat_TGFb_pWZL, by="row.names", sort=F)
+allStat_TGFb_shGFP<- merge(fit2$genes, allStat_TGFb_shGFP, by="row.names", sort=F)
+allStat_pWZL_shGFP<- merge(fit2$genes, allStat_pWZL_shGFP, by="row.names", sort=F)
+
+allStats_3Compar<- list(TGFb_pWZL= allStat_TGFb_pWZL, 
+                        TGFb_shGFP= allStat_TGFb_shGFP, 
+                        pWZL_shGFP= allStat_pWZL_shGFP)
+save(allStats_3Compar, file= "affy_allStats_3Compar.RData")
+```
+
+Look at the histogram of p-values.
+```{r}
+par(mfrow=c(1,3))
+hist(allStat_TGFb_pWZL$P.Value, breaks=100, main="TGFb_pWZL")
+hist(allStat_TGFb_shGFP$P.Value, breaks=100, main="TGFb_shGFP")
+hist(allStat_pWZL_shGFP$P.Value, breaks=100, main= "pWZL_shGFP")
+```
+
+Look at the volcano plot, comparing p-values and logFC
+```{r}
+volcanoplot(fit2, coef=1, highlight=10, names=allStat_TGFb_pWZL$Symbol,
+            xlab="Log Fold Change", ylab="Log Odds", main= "TGFb_pWZL", 
+            pch=16, cex=0.35)
+```
+
+We can select DEGs based on our own criteria, for example every gene with |logFC|>2 and adj.pvalue<0.01:
+```{r}
+DEGs<- allStat_TGFb_pWZL[allStat_TGFb_pWZL$adj.P.Val<0.01 &
+                           abs(allStat_TGFb_pWZL$logFC)>2, ] 
+dim(DEGs)
+write.table(DEGs,  "DEpvals_exprs_TGFb_pWZL.txt", row.names=TRUE, sep="\t" )
+```
+
+Note that these DE analysis was at the probe level... we can summarise that at the gene level. We will come back to this very soon.
+```{r}
+sum(duplicated(allStat_TGFb_pWZL$Symbol))
+```
+
+## Pathway and GO analysis
+Here, we perform pathway enrichment analysis using kegga() function in limma package.
+```{r}
+upDown<- DEGs$GeneID[!duplicated(DEGs$GeneID) & !is.na(DEGs$GeneID)]
+k.both<- kegga(upDown, species="Hs")
+topKEGG(k.both)
+```
+For Gene Onthology (GO) analysis, we use goana() function in limma package. Alternatively, we can do this manually using DAVID online tool.
+```{r}
+go<- goana(upDown, species="Hs")
+topGO(go)
+```
+
+Note that there are also some functions in limma for doing gene-set analysis, such as romer, roast, fry and camera. These functions do not need a list of DEGs but instead they help us to interpret the results in terms of gene-sets (pathways) not genes.
+
+We can take the average of probes mapped to the same gene, or take the probe with most significant values in the test. We will do this using avereps() function in limma package.
+```{r}
+## merge stats with geneExpression matrix:
+statExpr<- merge(allStat_TGFb_pWZL, exprs(dataNormFilt$eset), by.x="Row.names", by.y="row.names")
+Genedata<- avereps(statExpr[,10:30], ID= statExpr$GeneID) 
+Genedata<- Genedata[! is.na(row.names(Genedata)), ]
+```
+
+
+
+
