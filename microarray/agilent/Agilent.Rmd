@@ -12,13 +12,44 @@ The GEO accession number of the data that we use is "GSE28569".
 First, we should make sure that we have all the required libraries for our analysis. most of these packages are available through [Bioconductor](https://www.bioconductor.org). Here, we show you how to make another script that has all required packages for microarray analysis, and so instead of installing and loading them here, we just need to "source" that script before doing anything else. We name that script "RequiredPackagesMicroarryAnalysis.R".
 
 ```{r}
-pkgPath<- "/Users/Sepideh/Documents/Scripts/FreqUsedScripts/"
-source(paste0(pkgPath, "RequiredPackagesMicroarrayAnanlysis.R"))
+## check and install required packages:
+currentInstalledPackages <- installed.packages(priority=NULL)[,'Package']
 
-# source("http://bioconductor.org/biocLite.R")
-# biocLite(c("GEOquery", "limma", "dplyr", "ggplot2", "edgeR", "RSubread", "affy", "matrixStats"))
-# #add statmod and GO.db and org.Hs.eg.db package
-# library(limma)
+## check for Bioconductor packages
+requiredBioconductorPackages <- c("GEOquery", "limma", "dplyr", "ggplot2", "edgeR", 
+                                 "Rsubread", "affy", "simpleaffy", "gcrma",
+                                 "affyPLM", "MASS", "genefilter",
+                                 "matrixStats", "statmod", "GO.db", 
+                                 "org.Hs.eg.db", "hthgu133a.db", "R.utils")
+
+missingBioconductorPackages <-  setdiff(requiredBioconductorPackages,currentInstalledPackages)
+if (length(missingBioconductorPackages)==0){
+  message("All required Bioconductor packages are installed")
+} else {
+  message("Installing the following required Bioconductor packages")
+  print(missingBioconductorPackages)
+  source("http://bioconductor.org/biocLite.R")
+  biocLite(missingBioconductorPackages)
+}
+
+library(hthgu133a.db)
+library(annotate)
+library(GEOquery)    ## for downloading the data from GEO
+library(gcrma)       ## for gcrma()
+library(affy)        ## for readAffy and rma()
+library(simpleaffy)  
+library(affyPLM)     ## for visualise statistical characteristics of the CEL files, such as image, RLE, NUSE
+library(limma)       ## for DE analysis
+library(RColorBrewer)## for choosing colours
+library(dendextend)
+library(MASS)        ## for isoMDS
+library(genefilter)  ## for filtering the expression data
+library(statmod)
+library(GO.db)
+library(org.Hs.eg.db)
+library(R.utils)
+
+message("Setup for microarray analysis completed")
 
 ```
 ## Download and read the data

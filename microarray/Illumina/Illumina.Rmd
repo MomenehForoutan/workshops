@@ -8,13 +8,42 @@ output: html_notebook
 We are going to analyse Illumina platform "HumanWG-6 v3.0 expression beadchip" with GEO accession number "GSE20247". For Illumina, we usually have one single ".txt" file containing all the arrays in columns. It is recommended that the data are exported from the machine without any pre-processing. Intensity for control probes are usually written in a separate file, and if available, it can be read at the same time that we read Illumina probe summary file.
 
 ```{r}
-pkgPath<- "/Users/Sepideh/Documents/Scripts/FreqUsedScripts/"
-source(paste0(pkgPath, "RequiredPackagesMicroarrayAnanlysis.R"))
+## check and install required packages:
+currentInstalledPackages <- installed.packages(priority=NULL)[,'Package']
 
-# source("http://bioconductor.org/biocLite.R")
-# biocLite(c("GEOquery", "limma", "dplyr", "ggplot2", "edgeR", "RSubread", "affy", "matrixStats"))
-# library(limma)
+## check for Bioconductor packages
+requiredBioconductorPackages <- c("GEOquery", "limma", "dplyr", "ggplot2", "edgeR", 
+                                 "Rsubread", "affy", "simpleaffy", "gcrma",
+                                 "affyPLM", "MASS", "genefilter",
+                                 "matrixStats", "statmod", "GO.db", 
+                                 "org.Hs.eg.db", "hthgu133a.db", "R.utils")
 
+missingBioconductorPackages <-  setdiff(requiredBioconductorPackages,currentInstalledPackages)
+if (length(missingBioconductorPackages)==0){
+  message("All required Bioconductor packages are installed")
+} else {
+  message("Installing the following required Bioconductor packages")
+  print(missingBioconductorPackages)
+  source("http://bioconductor.org/biocLite.R")
+  biocLite(missingBioconductorPackages)
+}
+
+library(hthgu133a.db)
+library(annotate)
+library(GEOquery)    ## for downloading the data from GEO
+library(gcrma)       ## for gcrma()
+library(affy)        ## for readAffy and rma()
+library(simpleaffy)  
+library(affyPLM)     ## for visualise statistical characteristics of the CEL files, such as image, RLE, NUSE
+library(limma)       ## for DE analysis
+library(RColorBrewer)## for choosing colours
+library(dendextend)
+library(MASS)        ## for isoMDS
+library(genefilter)  ## for filtering the expression data
+library(statmod)
+library(GO.db)
+library(org.Hs.eg.db)
+library(R.utils)
 ```
 ## Download and read the data
 ```{r}

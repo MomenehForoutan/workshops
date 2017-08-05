@@ -1,0 +1,491 @@
+---
+title: "Transcriptomics data integration and batch correction"
+output: html_notebook
+---
+**Authors**: *Momeneh (Sepideh) Foroutan* and *Ramyar Molania*
+
+In this document, we intergrate normalised data from 10 microarray studies, assess the presence of unwanted variations in the integrated data, and show you different methods for removing batch effects for obtaining DEGs between the control and TGFb-treated samples. These methods include limma, ComBat, SVA and RUVs.
+
+
+First, we load the required libraries.
+```{r}
+library(limma)          ## for DE analysis
+library(sva)            ## for performing ComBat and SVA
+library(ruv)            ## for performing RUV
+library(NMF)            ## for drawing heatmaps
+library(matrixStats)    
+```
+
+Add a sub-directory to save the output of the analysis.
+```{r}
+mainPath<- getwd()
+dir.create(file.path(mainPath, "out"), showWarnings = FALSE)
+
+out_path<- "./out/"
+```
+Read in the 10 datasets (this level of data has been obtained in previous session).
+```{r}
+d<- read.table("minPval_10data_Deshiere.txt", header=T, sep="\t")
+hes<- read.table("minPval_10data_Hesling.txt", header=T, sep="\t")
+hil<- read.table("minPval_10data_Hills.txt", header=T, sep="\t")
+k<- read.table("minPval_10data_Keshamouni.txt", header=T, sep="\t")
+m<- read.table("minPval_10data_Maupin.txt", header=T, sep="\t")
+s_A<- read.table("minPval_10data_Sun_A.txt", header=T, sep="\t")
+s_HCC<- read.table("minPval_10data_Sun_HCC.txt", header=T, sep="\t")
+s_NCI<- read.table("minPval_10data_Sun_NCI.txt", header=T, sep="\t")
+t<- read.table("minPval_10data_Taube.txt", header=T, sep="\t")
+w<- read.table("minPval_10data_Walsh.txt", header=T, sep="\t")
+```
+For this part of the analysis, we only need the expression values not the test statistics. So, we subset each dataset and change the columns to have more meaningful column names.
+```{r}
+# names(d)
+good_cols<- grep(("Entrez|_R"), colnames(d) )
+d<- d[,good_cols]
+# head(d)
+colnames(d)<- c("D_Ctrl_R1", "D_TGFb_R1","D_Ctrl_R2", "D_TGFb_R2", "EntrezID" )
+
+good_cols<- grep(("Entrez|_R"), colnames(hes) )
+hes<- hes[,good_cols]
+colnames(hes)<- c("Hes_Ctrl_R1", "Hes_TGFb_R1", "Hes_Ctrl_R2", "Hes_TGFb_R2", "EntrezID")
+
+good_cols<- grep(("Entrez|X"), colnames(hil) )
+hil<- hil[,good_cols]
+colnames(hil)<- c("Hil_Ctrl_R1", "Hil_Ctrl_R2", "Hil_Ctrl_R3", 
+                  "Hil_TGFb_R1", "Hil_TGFb_R2", "Hil_TGFb_R3", "EntrezID")
+
+good_cols<- grep(("Entrez|_R"), colnames(k) )
+k<- k[, good_cols]
+colnames(k)<- c("K_Ctrl_R1", "K_Ctrl_R2", "K_Ctrl_R3", 
+                "K_TGFb_R1", "K_TGFb_R2", "K_TGFb_R3", "EntrezID")
+
+good_cols<- grep(("Entrez|_R"), colnames(m) )
+m<- m[, good_cols]
+colnames(m)<- c("M_Ctrl_R1", "M_Ctrl_R2", "M_Ctrl_R3", 
+                "M_TGFb_R1", "M_TGFb_R2", "M_TGFb_R3", "EntrezID")
+
+good_cols<- grep(("Entrez|.CEL"), colnames(s_A) )
+s_A<- s_A[, good_cols]
+colnames(s_A)<- c("S_A_Ctrl_R1", "S_A_Ctrl_R2", "S_A_Ctrl_R3", 
+                  "S_A_TGFb_R1", "S_A_TGFb_R2", "S_A_TGFb_R3", "EntrezID")
+
+good_cols<- grep(("Entrez|.CEL"), colnames(s_HCC) )
+s_HCC<- s_HCC[, good_cols]
+colnames(s_HCC)<- c("S_HCC_Ctrl_R1", "S_HCC_Ctrl_R2", "S_HCC_Ctrl_R3", 
+                    "S_HCC_TGFb_R1", "S_HCC_TGFb_R2", "S_HCC_TGFb_R3", "EntrezID")
+
+good_cols<- grep(("Entrez|.CEL"), colnames(s_NCI) )
+s_NCI<- s_NCI[, good_cols]
+colnames(s_NCI)<- c("S_NCI_Ctrl_R1", "S_NCI_Ctrl_R2", "S_NCI_Ctrl_R3", 
+                    "S_NCI_TGFb_R1", "S_NCI_TGFb_R2", "S_NCI_TGFb_R3", "EntrezID")
+
+good_cols<- grep(("Entrez|_R"), colnames(t) )
+t<- t[, good_cols]
+colnames(t)<- c("T_Ctrl1_R1", "T_Ctrl1_R2", "T_Ctrl1_R3", 
+                "T_TGFb_R1", "T_TGFb_R2", "T_TGFb_R3", 
+                "T_Ctrl2_R1", "T_Ctrl2_R2", "T_Ctrl2_R3", "EntrezID")
+
+good_cols<- grep(("Entrez|_R"), colnames(w) )
+w<- w[, good_cols]
+colnames(w)<- c("W_Ctrl_R1", "W_Ctrl_R2", "W_Ctrl_R3", 
+                "W_TGFb_R1", "W_TGFb_R2", "W_TGFb_R3", "EntrezID")
+
+```
+Then, we creat a list containing all the datasets and merge them.
+```{r}
+datasets<- list(d,hes, hil, m, k, s_A, s_HCC, s_NCI, t, w)
+
+multmerge <- function(data){
+  Reduce(function(x,y) {merge(x,y, by= "EntrezID")}, data)
+}
+all<- multmerge(datasets)
+names(all)
+dim(all) #11900  60
+
+write.table(all, paste(out_path, "expr_10data.txt", sep=""), row.names=F, sep="\t")
+```
+Look at the merged data:
+```{r}
+# all<- read.table("./out_10data_check/expr_10data.txt", sep="\t", header=T)
+head(all, 3)
+m<- all[,2:60]
+row.names(m)<- all[,1]
+m<- as.matrix(m)
+```
+
+We creat a data frame containing the information related to each of the samples, including the name of the studies, type of platforms, treatment, and tissue types; we will be using these information later for batch visulaisation and correction.
+```{r}
+
+info<- data.frame(samples=colnames(all)[-1], 
+                  study=NA, treatment=NA, platform=NA, tissue=NA )
+head(info)
+
+index_c<- grep("Ctrl", info$samples)  ## take the indices for control samples 
+info$treatment[index_c] <- "Ctrl"
+
+index_t<- grep("TGFb", info$samples)  ## ## take the indices for TGFb samples 
+info$treatment[index_t] <- "TGFb"
+
+info$study<- c(rep("Deshiere", 4), rep("Hesling", 4), rep("Hills", 6),
+               rep("Maupin", 6), rep("Keshamouni", 6), rep("Sun_A549", 6),
+               rep("Sun_HCC", 6), rep("Sun_NCI", 6), rep("Taube", 9), 
+               rep("Walsh", 6))
+
+info$platform<- c(rep("Agilent", 4), rep("HG_U133_Plus2", 4), rep("Illumina", 6),
+                  rep("HG_U133_Plus2", 6), rep("HG_U133_Plus2", 6), rep("HG_U133_Plus2", 6),
+                  rep("HG_U133_Plus2", 6), rep("HG_U133_Plus2", 6), rep("HT_HG_U133A", 9), 
+                  rep("HG_U133A_2", 6))
+
+info$tissue<- c(rep("Breast", 4), rep("Breast", 4), rep("Kidney", 6),
+                rep("Pancrease", 6), rep("Lung", 6), rep("Lung", 6),
+                rep("Lung", 6), rep("Lung", 6), rep("Breast", 9), 
+                rep("Kidney", 6))
+info
+
+write.table(info, paste(out_path, "info_10data.txt", sep=""), row.names=F, sep="\t")
+#info<- read.table("out_10data_check/info_10data.txt", sep="\t", header=T)
+```
+## Assessment of unwanted variations in the data.
+Here we perform some exploratory analysis on the integrated datato assess the amount of batch (or unwanted variation) on the data.\
+We start with RLE plots.
+
+```{r}
+mycols<- c("blue", "cyan", "violet", "dark green", "gold", 
+           "orangered", "pink", "gray", "light blue", "turquoise",
+           "red")
+rle<- m-rowMedians(m)
+boxplot(rle , col= mycols[as.factor(info$study)] ,
+          # ylim=ylim, 
+          las=2 , cex.axis=1.2 , ylab="RLE" , xlab="Samples" , cex.lab=1.2 ,
+          names=FALSE  , frame=F  , whisklty = 1, staplelty = 0 , outline=FALSE )
+abline(h=0 , col="darkblue", lwd=2)
+legend(x=20, y=-1, legend=unique(as.factor(info$study)), col= mycols[unique(as.factor(info$study))], lty=1, cex=0.6)
+```
+
+```{r}
+boxplot(rle , col= mycols[as.factor(info$platform)] ,
+          # ylim=ylim, 
+          las=2 , cex.axis=1.2 , ylab="RLE" , xlab="Samples" , cex.lab=1.2 ,
+          names=FALSE  , frame=F  , whisklty = 1, staplelty = 0 , outline=FALSE )
+abline(h=0 , col="darkblue", lwd=2)
+legend(x=20, y=-3, legend=unique(as.factor(info$platform)), col= mycols[unique(as.factor(info$platform))], lty=1, cex=0.6)
+```
+
+Assess the presence of batch effects using MDS plots coloured according to batch or biology. 
+```{r}
+mycols<- c("orange", "turquoise2", "red3", "darkgreen", "gold", "pink3", 
+           "grey10", "blue", "violetred1", "tan4")
+plotMDS(m, col= mycols[as.factor(info$study)], pch=19, cex=1.5)
+legend(x=4, y=.8, legend=unique(as.factor(info$study)), col= mycols[unique(as.factor(info$study))], pch=19, cex=0.7)
+```
+
+```{r}
+plotMDS(m, col= mycols[as.factor(info$treatment)], pch=19, cex=1.5)
+legend(x=4, y=-1, legend=unique(as.factor(info$treatment)), col= mycols[unique(as.factor(info$treatment))], pch=19, cex=1)
+```
+
+## Remove bacth effects for obtaining DEGs.
+In this section we discuss several ways to remove unwanted variations *when the purpose of study is DE analysis*.\
+The first option is to remove batch while we are doing DE analysis using **limma** package. Then we explain about ComBat, SVA and RUVs.\
+The batch correction methods used in limma and ComBat are dependent on the "known" batch effects; i.e. you need to know what is the source of unwanted variations (such as different laboratories, different years of running experiments, etc.). However, SVA and RUV methods estimate surrogate variables or unwanted variations and then remove them.\
+For the current example, this is really important to note that because in a few cases the platforms and studies are completely confounded, we don't know for sure how much of the variations come from the study or the platform... these kinds of confounding situations cannot be handeled by any of the methods and must be avoided when designing an experiment. Here, we only consider "study" as the true source of variation.
+
+### Batch correction using limma
+The *removeBatchEffect()* function in limma takes the expr matrix, a column for batch, and a column for covariates, if applicable. Note that covariates are different from batches: Batch effects are categorical variables such as locations or platforms, while covariates are numeric values and it takes into account that how large are the values, such as treating a cell with an stimulus for one day vs. six days. Note that here we consider "study" as the resource of unwantd variation, and interestingly, if we add a second batch term into the *removeBatchEffect()* it throws a warning and gives us exactly the same data as without including the second batch term. We use this function **only** for visulaisation purposes, then we show how we remove batch by including the batch term in the design matrix. 
+```{r}
+groups<- info$treatment
+designLimma<- model.matrix( ~ groups)
+cleanDataLimma<- removeBatchEffect(m, batch = info$study, design= designLimma)
+
+## If we add a second batch source, platform:
+cleanDataLimma2<- removeBatchEffect(m, batch = info$study, batch2 = info$platform, design= designLimma)
+
+## check to see if the two clean data are the same:
+identical(cleanDataLimma2, cleanDataLimma)
+## so remove the second data:
+rm(cleanDataLimma2)
+```
+Now look at the RLE and MDS plots after correcting the data.
+```{r}
+## RLE:
+rleLimma<- cleanDataLimma-rowMedians(cleanDataLimma)
+boxplot(rleLimma , col= mycols[as.factor(info$study)] ,
+          las=2 , cex.axis=1.2 , ylab="RLE" , xlab="Samples" , cex.lab=1.2 ,
+          names=FALSE  , frame=F  , whisklty = 1, staplelty = 0 , outline=FALSE )
+abline(h=0 , col="darkblue", lwd=2)
+```
+
+```{r}
+## MDS
+par(mfrow=c(1,2))
+plotMDS(cleanDataLimma, col= mycols[as.factor(info$study)], pch=19, cex=1.5)
+plotMDS(cleanDataLimma, col= mycols[as.factor(info$treatment)], pch=19, cex=1.5)
+```
+To remove batch effect, we include a term into our design matrix to remove it while performing DE analysis. 
+```{r}
+groups<- info$treatment
+batch<- info$study
+designLimma<- model.matrix(~ groups + batch)
+```
+
+```{r}
+fitLimma <- lmFit(m, design = designLimma)
+fitLimma<- eBayes(fitLimma, robust = TRUE, trend = F)
+plotSA(fitLimma)
+```
+
+```{r}
+summary(decideTests(fitLimma))
+```
+Get the test statistics and store DEGs.
+```{r}
+statLimma<- topTable(fitLimma, coef = "groupsTGFb", n="inf", sort.by="none")
+DEGsLimma<- statLimma[ abs(statLimma$logFC) > 1 & 
+                         statLimma$adj.P.Val< 0.05, ]
+dim(DEGsLimma)  ## 326
+```
+Look at the heatmap of DEGs.
+```{r}
+library(NMF)
+DEGsExprLimma<- cleanDataLimma[ rownames(cleanDataLimma) %in% rownames(DEGsLimma), ]
+# hc <- hclust( dist(DEGsExprLimma) )
+aheatmap(DEGsExprLimma, info = TRUE)
+
+```
+
+
+### batch correction using ComBat
+The *ComBat()* function can be applied through **sva** package. This function gives you clean data. Many people use the clean data to obtain DEGs through limma; however, you should be carefule because after correction the clean data have new characteristics and may not follow the assumption of limma. specifically, after correction,  degrees of freedom would change, and variances of error terms for each gene across samples would not be common.
+```{r}
+# library(sva)
+batch<- info$study
+
+designComBat = model.matrix( ~ 1, data=info) ## creating model matrix that includes only intercept.
+cleanDataComBat<- ComBat(m, batch, designComBat, par.prior=T, prior.plots=T)
+```
+Look at the RLE plot after correction.
+```{r}
+rleComBat<- cleanDataComBat-rowMedians(cleanDataComBat)
+boxplot(rleComBat , col= mycols[as.factor(info$study)] ,
+          las=2 , cex.axis=1.2 , ylab="RLE" , xlab="Samples" , cex.lab=1.2 ,
+          names=FALSE  , frame=F  , whisklty = 1, staplelty = 0 , outline=FALSE )
+abline(h=0 , col="darkblue", lwd=2)
+```
+
+```{r}
+## MDS
+par(mfrow=c(1,2))
+plotMDS(cleanDataComBat, col= mycols[as.factor(info$study)], pch=19, cex=1.5)
+plotMDS(cleanDataComBat, col= mycols[as.factor(info$treatment)], pch=19, cex=1.5)
+```
+
+```{r}
+groups<- factor(info$treatment)
+
+# Design matrix based on groups:
+designComBat<- model.matrix(~ groups)  # 0:ctrl, 1:TGFb
+designComBat
+# fit linear model using limma package:
+fitComBat<- lmFit(cleanDataComBat, design= designComBat) 
+fitComBat<- eBayes(fitComBat, robust = TRUE, trend = F)
+# plotSA(fitComBat)
+summary(decideTests(fitComBat))
+```
+
+Get the test statistics and store DEGs.
+```{r}
+statComBat<- topTable(fitComBat, coef = "groupsTGFb", n="inf", sort.by="none")
+DEGsComBat<- statComBat[ abs(statComBat$logFC) > 1 &
+                           statComBat$adj.P.Val< 0.05, ]
+dim(DEGsComBat)  ## 195
+```
+
+### Batch correction using SVA
+The **sva** package enables us estimate surrogate variables (SVs) and then remove them by including them in the linear model. The *sva()* function estimates the number of SVs. Based on this function, we have 9 SVs. We then add these SVs to the linear model to adjust for them.
+```{r}
+groups<- factor(info$treatment)
+mod<- model.matrix( ~ groups)
+svaFit<- sva(m, mod)   ## 9 significant SVs
+```
+
+```{r}
+## add SVs to the model:
+designSVA<- model.matrix( ~ groups + svaFit$sv)
+fitSVA<- lmFit(as.matrix(m), designSVA)
+fitSVA<- eBayes(fitSVA, robust = T, trend = F)
+head(fitSVA$coefficients)
+summary(decideTests(fitSVA))
+```
+Obtain DEGs.
+```{r}
+##------- obtaining DEGs: 
+statSVA<- toptable(fitSVA, coef="groupsTGFb", n="inf", sort.by="none")
+DEGsSVA <- statSVA[ abs(statSVA$logFC) > 1 & 
+                      statSVA$adj.P.Val < 0.05 , ]
+dim(DEGsSVA)   ## 322
+```
+
+### Batch correcion using RUV
+There are several RUV methods for removing unwanted variations in order to obtain DEGs; these include RUV-1, RUV-2, RUV-4, RUV-inv and RUV-rinv. In general, RUV methods are dependent on negative control genes (genes which are not associated with the biological factor of interest) and replicate samples (if applicable). RUV-2 removes unwanted variations in two steps. RUV-4 came after RUV-2 and has four steps. For RUV-4 we need to estimate the number of unwanted variations (k), while for RUV-inv and RUV-rinv we don't need to estimate k as it is set to be maximum. In general, RUV-inv and RUV-rinv are better than RUV-4. RUV-inv is recommended when we have large number of control genes (~1000), while RUV-rinv is more appropriate with small number of control genes (~60). The negative control genes can be the housekeeping (HK) genes or emprical control genes.\
+Here, we only focus on RUV-inv, which is performed by *RUVinv()* function. This function take expression matrix (Y), biological factor of interest (X), and a vector for indices of negative control genes (ctl).\
+We load **ruv** package, first, and then we read in the list of HK genes. Using HK genes is not always ideal. that is why we  use these HK genes and perform RUV-inv to obtain some statistics, from which we choose genes that are mostly stable across the samples as the *emprical negative control genes*. Then we apply RUV-inv again using these emprical control genes. 
+```{r}
+# library(ruv)
+HKgenes<- read.table("HouseKeeping_genes_IDs.txt", header=T, sep="\t")
+hk<- HKgenes$GeneID
+mat<- t(m)
+mat[1:5,1:5]
+ctrl<- colnames(mat) %in% hk
+head(ctrl)
+```
+
+```{r}
+groups<- factor(info$treatment)  ## take the biological factor of interest
+g<- matrix(groups, ncol=1)
+g<- as.numeric(as.factor(g))  ## 1 control   2 TGFb
+g<- matrix(g, ncol=1)
+  
+ruv<- RUVinv(Y=mat, X=g, ctl= ctrl, Z = 1, fullW0 = NULL, lambda = NULL, iterN = 100000)
+pvals<- t(ruv$p)
+pvals<- data.frame(pvals)
+
+ruv.adj <- variance_adjust(ruv, ebayes = TRUE, evar = TRUE, rsvar = TRUE, bin = 10, rescaleconst = NULL)
+
+adjpvals<- t(ruv.adj$p.BH)
+adjpvals<- data.frame(adjpvals)
+adjpvals$genes<- row.names(pvals)
+
+adjpvals.ordered <- data.frame(adjpvals[order(adjpvals$adjpvals),])
+
+nGenes<- 0.3 * length(ruv.adj$p.BH)  ## 3570
+empCtrl<- tail(adjpvals.ordered$genes, nGenes)
+empCtrl<- colnames(mat) %in% empCtrl
+```
+Use emprical ontrl genes to apply RUV-inv.
+```{r}
+ruvEmp<- RUVinv(Y=mat, X=g, ctl=empCtrl, Z = 1, fullW0 = NULL, lambda = NULL, iterN = 100000)
+```
+Here, we try to obtain test statistics, and select DEGs.
+```{r}
+##---- adjust p values:
+ruv.adjEmp <- variance_adjust ( ruvEmp, ebayes = TRUE, evar = TRUE, rsvar = TRUE, bin = 10, rescaleconst = NULL)
+
+ruv.adjpvalsEmp <- t(ruv.adjEmp$p.BH)
+ruv.adjpvalsEmp<- data.frame(ruv.adjpvalsEmp)
+# head(ruv.adjpvalsEmp)
+ruv.adjpvalsEmp$genes<- row.names(pvals)
+
+##---- add betahats (logFC) to this:
+ruv.adjpvalsEmp$logFC<- t(ruv.adjEmp$betahat)
+
+##---- add t statistics (t) to this:
+ruv.adjpvalsEmp$t<- t(ruv.adjEmp$t)
+
+##---- add raw p-values 
+ruv.adjpvalsEmp$P.Value<- t(ruv.adjEmp$p)
+
+#  export all the p vals and logFCs:
+#  write.table(ruv.adjpvalsEmp.ordered, paste0(out_path, method, "_all_adjPvals_logFC_EmpricalCtrl.txt"), sep="\t", row.names=F)
+
+statRUV<- ruv.adjpvalsEmp
+rm(ruv.adjpvalsEmp)
+## change the col name for adjusted p values so it will be consistent with the other three methods:
+colnames(statRUV) [1]<- c("adj.P.Val")
+
+##---------------- obtain DEGs:
+DEGsRUV <- statRUV[statRUV$adj.P.Val < 0.05 &
+                              abs(statRUV$logFC) >  1 ,]  ##  
+
+dim(DEGsRUV)   ## 71 genes
+```
+
+### Comparing the results of DE analysis from different batch correction methods.
+**1. Compare distribution of p-values.**
+```{r}
+par(mfrow=c(2,2))
+hist(statLimma$P.Value, breaks=100, col="light blue", main="Limma", 
+     xlab="p-values")
+hist(statComBat$P.Value, breaks=100, col="light blue", main="ComBat", 
+     xlab="p-values")
+hist(statSVA$P.Value, breaks=100, col="light blue", main="SVA", 
+     xlab="p-values")
+hist(statRUV$P.Value, breaks=100, col="light blue", main="RUV", 
+     xlab="p-values")
+```
+
+**2. Compare volcano plots.**
+```{r}
+
+par(mfrow=c(2,2))
+plot(statLimma$logFC, -log10(statLimma$P.Value), cex=0.6, 
+     main="Limma", xlab="logFC", ylab="-log10(p-value)")
+indx<- which(abs(statLimma$logFC) > 1 &
+               statLimma$adj.P.Val<0.05)
+  points(statLimma$logFC[indx], -log10(statLimma$P.Value[indx]), col="red")
+  abline(h=-log10(max(statLimma$P.Value[indx])))
+  
+plot(statComBat$logFC, -log10(statComBat$P.Value), cex=0.6, 
+     main="ComBat", xlab="logFC", ylab="-log10(p-value)")
+indx<- which(abs(statComBat$logFC) > 1 &
+                   statComBat$adj.P.Val<0.05)
+  points(statComBat$logFC[indx], -log10(statComBat$P.Value[indx]), col="red")
+  abline(h=-log10(max(statComBat$P.Value[indx])))
+  
+plot(statSVA$logFC, -log10(statSVA$P.Value), cex=0.6, 
+     main="SVA", xlab="logFC", ylab="-log10(p-value)")
+indx<- which(abs(statSVA$logFC) > 1 &
+                   statSVA$adj.P.Val<0.05)
+  points(statSVA$logFC[indx], -log10(statSVA$P.Value[indx]), col="red")
+  abline(h=-log10(max(statSVA$P.Value[indx])))
+  
+plot(statRUV$logFC, -log10(statRUV$P.Value), cex=0.6, 
+     main="RUV", xlab="logFC", ylab="-log10(p-value)")
+indx<- which(abs(statRUV$logFC) > 1 &
+                   statRUV$adj.P.Val<0.05)
+  points(statRUV$logFC[indx], -log10(statRUV$P.Value[indx]), col="red")
+  abline(h=-log10(max(statRUV$P.Value[indx])))
+```
+
+**3. Draw a Venn diagram comparing DEGs**
+```{r}
+allDEGs<- c(row.names(DEGsLimma), row.names(DEGsComBat), row.names(DEGsSVA), DEGsRUV$genes)
+
+length(allDEGs) ## 728
+
+## remove duplicated gene symbols:
+allDEGs<- allDEGs[!duplicated(allDEGs)]  
+length(allDEGs)  ## 318
+
+
+## create a matrix of zero for all the genes across four signatures, we will replcae these zeros 
+## with "one" if the gene presents in those signatures:
+
+Counts <- matrix(0, nrow= length(allDEGs), ncol=4)
+row.names(Counts)<- allDEGs
+colnames(Counts)<- c("Limma", "ComBat", "SVA", "RUVinv")
+
+for( i in 1:length(allDEGs)) {
+  Counts[i,1]<- allDEGs[i] %in% row.names(DEGsLimma)
+  Counts[i,2]<- allDEGs[i] %in% row.names(DEGsComBat)
+  Counts[i,3]<- allDEGs[i] %in% row.names(DEGsSVA)
+  Counts[i,4]<- allDEGs[i] %in% DEGsRUV$genes
+}
+
+col<- c("red", "green4", "blue", "violet")
+
+vennDiagram(vennCounts(Counts), circle.col=col, cex=c(1.6, 1.2, 1), lwd=2)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

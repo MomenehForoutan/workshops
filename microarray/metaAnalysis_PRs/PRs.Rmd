@@ -1,0 +1,512 @@
+---
+title: "Transcriptomics data integration & Product of Ranks (PR)"
+output: html_notebook
+---
+**Authors**: *Momeneh (Sepideh) Foroutan* and *Ramyar Molania*
+
+We had previously performed DE analysis on 10 datasets (using the limma package), and exported the test statistics and the normalised expression values for each study separately. Now, we want to read in all the datasets, subset datasets to only the common IDs between them, and for the probes mapped to the same gene, consider probe with the most significant p-value.  Then we perform product of rank to obtain genes differentially expressed between control and TGFb-stimulated conditions, by comparing observed PRs to permuted PRs. 
+
+## Read the datasets and subset them by common Entrez IDs
+These datasets include both statitics from DE analysis and normalised gene expression data. 
+```{r}
+Taube <- read.table("All_pvals_exprs_annot_Taube.txt", header=T, sep="\t") 
+Maupin <- read.table("All_pvals_exprs_annot_Maupin.txt", header=T, sep="\t")
+Deshiere <- read.table("All_pvals_exprs_info_annot_Deshiere.txt", header=T, sep="\t", quote = "") 
+Keshamouni<- read.table("All_pvals_exprs_annot_Keshamouni.txt", header=T, sep="\t")
+Hesling<- read.table("All_pvals_exprs_annot_Hesling.txt", header=T, sep="\t")
+Hills<- read.table("All_pvals_exprs_annot_Hills.txt", header=T, sep="\t")
+Sun_A<- read.table("All_pvals_exprs_annot_Sun_A549.txt", header=T, sep="\t")
+Sun_HCC<- read.table("All_pvals_exprs_annot_Sun_HCC827.txt", header=T, sep="\t")
+Sun_NCI<- read.table("All_pvals_exprs_annot_Sun_NCI-H358.txt", header=T, sep="\t")
+Walsh<- read.table("All_pvals_exprs_annot_Walsh.txt", header=T, sep="\t")
+```
+For each of the datasets we take Entrez IDs, so we can take the overlapped IDs across all of them as the common IDs. Here we use functions *Reduce()* and *intersect()* together to be able to take the overlapped genes between all the studies at once.
+```{r}
+Entrez <- grep('Entrez', names(Taube))
+id_T<- as.character(Taube[,Entrez])   
+# length(id_T) # 19726
+
+Entrez <- grep('Entrez', names(Maupin))
+id_M<- as.character(Maupin[,Entrez])   
+# length(id_M) # 41834
+
+Entrez <- grep('Entrez', names(Deshiere))
+id_D<- as.character(Deshiere[,Entrez])   
+# length(id_D) # 29809
+
+Entrez <- grep('Entrez', names(Keshamouni))
+id_K<- as.character(Keshamouni[,Entrez])   
+
+Entrez <- grep('Entrez', names(Hesling))
+id_Hes<- as.character(Hesling[,Entrez])   
+
+Entrez <- grep('Entrez', names(Hills))
+id_Hil<- as.character(Hills[,Entrez])   
+
+Entrez <- grep('Entrez', names(Sun_A))
+id_Sun_A<- as.character(Sun_A[,Entrez])   
+
+Entrez <- grep('Entrez', names(Sun_HCC))
+id_Sun_H<- as.character(Sun_HCC[,Entrez])   
+
+Entrez <- grep('Entrez', names(Sun_NCI))
+id_Sun_N<- as.character(Sun_NCI[,Entrez])   
+
+Entrez <- grep('Entrez', names(Walsh))
+id_W<- as.character(Walsh[,Entrez]) 
+
+commonIDs<- Reduce(intersect, list(id_T, id_M, id_D, id_K,
+                                   id_Hes, id_Hil, id_Sun_A, id_Sun_H, id_Sun_H, id_W))
+length(commonIDs)   # 11900 common IDs for 10 data
+```
+Then we subset the datasets to have only data related to the common Entrez IDs across all the ten datasets.
+```{r}
+## make a sub-dire
+mainPath<- getwd()
+dir.create(file.path(mainPath, "out"), showWarnings = FALSE)
+
+out_path<- "./out/"
+study<- c("Taube", "Maupin", "Deshiere", "Keshamouni", "Hesling", 
+          "Hills", "Sun_A", "Sun_HCC", "Sun_NCI", "Walsh")
+
+## this for loop takes only info related to the common entrez IDs in each dataset and exports that:
+
+for (s in 1:length(study)){
+  data<- get(study[s])
+  Entrez <- grep('Entrez', names(data))
+  commonData<- data[data[,Entrez] %in% commonIDs, ]
+  # dim(commonData)
+  write.table(commonData, paste0(out_path, "CommonData_10data_", study[s], ".txt"), 
+              sep= "\t", row.names=FALSE, col.names=TRUE)
+}
+```
+
+```{r}
+Taube<- read.table(paste0(out_path, "CommonData_10data_Taube.txt"), header=T, sep="\t")
+Maupin<- read.table(paste0(out_path, "CommonData_10data_Maupin.txt"), header=T, sep="\t")
+Deshiere<- read.table(paste0(out_path, "CommonData_10data_Deshiere.txt"), header=T, sep="\t")
+Keshamouni<- read.table(paste0(out_path, "CommonData_10data_Keshamouni.txt"), header=T, sep="\t")
+
+Hesling<- read.table(paste0(out_path, "CommonData_10data_Hesling.txt"), header=T, sep="\t")
+Hills<- read.table(paste0(out_path, "CommonData_10data_Hills.txt"), header=T, sep="\t")
+Walsh<- read.table(paste0(out_path, "CommonData_10data_Walsh.txt"), header=T, sep="\t")
+
+Sun_A<- read.table(paste0(out_path, "CommonData_10data_Sun_A.txt"), header=T, sep="\t")
+Sun_HCC<- read.table(paste0(out_path, "CommonData_10data_Sun_HCC.txt"), header=T, sep="\t")
+Sun_NCI<- read.table(paste0(out_path, "CommonData_10data_Sun_NCI.txt"), header=T, sep="\t")
+
+```
+
+## Rank genes based on their test statistics
+To obtain up- and down- regulated gene sets using product of ranks, we need to apply the method twice: once we rank genes based on their t-statistics in decreasing order and then perform PR to obtain up-regulated genes, and once we rank genes in increasing order and perform PR to obtain down-regulated genes.
+Here we creat sub-directories to save only the outputs for the Ranked_t_up_....txt OR the Ranked_t_down....txt files.
+```{r}
+mainPath<- "W:/Rdir/workshop_iran/PRs/out"
+
+dir.create(file.path(mainPath, "t_up"), showWarnings = FALSE)
+dir.create(file.path(mainPath, "t_down"), showWarnings = FALSE)
+```
+
+As we have 10 datasets, we need to write a for loop so it will perform the same pipeline 10 times. This for loop, in the first step, takes a dataset from the list of the ten datasets, then it takes the probe with the most significant p-value for the probes that are mapped to the same gene in that dataset, and then exports the data. We use a few functions from the **dplyr** package here. In the next step of the for loops, we rank genes based on their t values in decreasing order and export the data into the "t_up" folder, and finally we rank genes in increasing order and export the data in "t_down" folder. Also, note that we only select the columns containing test statistics using *grepl()* function.
+```{r}
+library("dplyr")
+
+study<- c("Taube", "Maupin", "Deshiere", "Keshamouni", "Hesling", 
+          "Hills", "Sun_A", "Sun_HCC", "Sun_NCI", "Walsh")
+
+for (s in 1:length(study)){
+  
+  ## this part of for loop for probes mapped to the same genes, takes the probes with 
+  ## most significant p values in each of the 10 datasets:
+  data<- get(study[s])
+  ## Because the column containing Entrez IDs in ten datasets does not have a consistent name, we make that name cpnsisntent! 
+  ## We do the same thing for Probe IDs.
+  Entrez <- grep('Entrez', names(data))
+  names(data)[Entrez]<- "EntrezID"
+  Entrez <- grep('Entrez', names(data))
+  GeneSymbol_col<- grep('Symbol', names(data))
+  names(data)[1]<- "probeID"
+  
+  min_pvals<- data %>%
+    group_by(EntrezID) %>%  
+    filter(adj.P.Val== min(adj.P.Val))
+  
+  Entrez_col<- grep('Entrez', names(min_pvals))
+  min_pvals<- min_pvals[ ! duplicated(min_pvals[,Entrez_col]),]
+  
+  ## export this file and we will use this for integrating the ten datasets:
+  write.table(min_pvals, paste(out_path, "minPval_10data_", study[s], ".txt", sep=""), 
+              sep= "\t", row.names=FALSE, col.names=TRUE)
+  
+  ## this part of for loop, ranks t values in decreasing order to have up-regulated genes 
+  ## at the top of the list (lower ranks), and export the ranked data:
+  rank_path_up<- "./out/t_up/" 
+  
+  d<- min_pvals
+  d_ranked<- d[ order(d$t, decreasing=T) ,]  
+  d_ranked$Rank <-  cumsum(!duplicated(d_ranked$t))
+  
+    goodcols<- grepl("[Pp]robe", names(d_ranked))|
+    grepl("[Ss]ymbol",names(d_ranked))|  
+    grepl("logFC", names(d_ranked))|
+    grepl("^t$", names(d_ranked))|
+    grepl("^B$", names(d_ranked))|
+    grepl("P.Value", names(d_ranked))|
+    grepl("adj.P.Val", names(d_ranked))|
+    grepl("Entrez", names(d_ranked))|
+    grepl("Rank", names(d_ranked))
+  
+  d_ranked<- d_ranked[ , goodcols]
+
+  write.table(d_ranked, paste(rank_path_up, "Ranked_t_up_10data_", study[s], ".txt", sep=""), 
+              sep= "\t", row.names=FALSE, col.names=TRUE)
+  
+  ## this part of for loop, ranks t values in increasing order to have down-regulated genes
+  ## at the top of the list(lower ranks), and export the ranked data:
+  rank_path_down<- "./out/t_down/" 
+  
+  d_ranked_down<- d[order(d$t, decreasing=F),]  ## note that for down geneset we rank in reverse order
+  d_ranked_down$Rank <-  cumsum(!duplicated(d_ranked_down$t))
+  
+    goodcols<- grepl("[Pp]robe", names(d_ranked_down))|
+    grepl("[Ss]ymbol",names(d_ranked_down))|  
+    grepl("logFC", names(d_ranked_down))|
+    grepl("^t$", names(d_ranked_down))|
+    grepl("^B$", names(d_ranked_down))|
+    grepl("P.Value", names(d_ranked_down))|
+    grepl("adj.P.Val", names(d_ranked_down))|
+    grepl("Entrez", names(d_ranked_down))|
+    grepl("Rank", names(d_ranked_down))
+  
+  d_ranked_down<- d_ranked_down[,goodcols]
+
+  write.table(d_ranked_down, paste(rank_path_down, "Ranked_t_down_10data_", study[s], ".txt", sep=""), 
+              sep= "\t", row.names=FALSE, col.names=TRUE)
+}
+
+```
+
+## Merge datasets and perform PR
+
+The pipline belowe for obtaining up-regulated gene set will need to be repeated to obtain the down- regulated gene set.
+
+### Obtaining up-regulated gene set:
+We define a function, *multmerge()*, that helps us to read all the files in the certain directory and merge multiple datasets. Note that we will get several warnings by running this chunck of code because the name of columns will be repeated, e.g. we will have 10 columns for logFC, B, PVal, etc. We will deal with these warnings in the following chunk of codes.
+
+```{r}
+## first we delete everything we defined in the environment, by this code:
+rm(list=ls())
+
+rank_path_up<- "./out/t_up" 
+out_path<- "./out/"
+upDown<- "up"
+
+multmerge = function(mypath){
+  filenames=list.files(path=mypath, full.names=TRUE)
+  datalist = lapply(filenames, function(x){read.table(file=x, header=T, sep="\t")})
+  Reduce(function(x,y) {merge(x,y, by= "EntrezID")}, datalist)}
+
+merge_rank_t_up<- multmerge(rank_path_up)  ## we get warnings here and will deal with this in the next section
+names(merge_rank_t_up)
+```
+We change the column names based on the studies.
+```{r}
+# change column names to include the name of the relevant dataset:
+cols<- c("EntrezID", 
+         "probeID_Deshiere", "logFC_Deshiere", "t_Deshiere", "pval_Deshiere", 
+         "adj_pval_Deshiere", "B_Deshiere", "GeneSymbol_Deshiere", "rank_Deshiere", 
+         
+         "probeID_Hesling", "logFC_Hesling", "t_Hesling", "pval_Hesling", 
+         "adj_pval_Hesling", "B_Hesling", "GeneSymbol_Hesling", "rank_Hesling",
+         
+         "probeID_Hills", "logFC_Hills", "t_Hills", "pval_Hills", 
+         "adj_pval_Hills", "B_Hills", "GeneSymbol_Hills", "rank_Hills",
+         
+         "probeID_Keshamouni", "logFC_Keshamouni", "t_Keshamouni", "pval_Keshamouni", 
+         "adj_pval_Keshamouni", "B_Keshamouni", "GeneSymbol_Keshamouni", "rank_Keshamouni",
+         
+         "probeID_Maupin", "logFC_Maupin", "t_Maupin", "pval_Maupin", 
+         "adj_pval_Maupin", "B_Maupin", "GeneSymbol_Maupin", "rank_Maupin",
+         
+         "probeID_Sun_A549", "logFC_Sun_A549", "t_Sun_A549", "pval_Sun_A549",
+         "adj_pval_Sun_A549", "B_Sun_A549", "GeneSymbol_Sun_A549", "rank_Sun_A549",
+         
+         "probeID_Sun_HCC827", "logFC_Sun_HCC827", "t_Sun_HCC827", "pval_Sun_HCC827", 
+         "adj_pval_Sun_HCC827", "B_Sun_HCC827", "GeneSymbol_Sun_HCC827", "rank_Sun_HCC827",
+         
+         "probeID_Sun_NCI_H358", "logFC_Sun_NCI_H358", "t_Sun_NCI_H358", "pval_Sun_NCI_H358", 
+         "adj_pval_Sun_NCI_H358", "B_Sun_NCI_H358", "GeneSymbol_Sun_NCI_H358", "rank_Sun_NCI_H358",
+         
+         "probeID_Taube", "logFC_Taube", "t_Taube", "pval_Taube", 
+         "adj_pval_Taube", "B_Taube", "GeneSymbol_Taube", "rank_Taube",
+         
+         "probeID_Walsh", "logFC_Walsh", "t_Walsh", "pval_Walsh", 
+         "adj_pval_Walsh", "B_Walsh", "GeneSymbol_Walsh", "rank_Walsh")
+colnames(merge_rank_t_up)<- cols
+head(merge_rank_t_up,6)
+```
+
+Now, we perform product of rank for the up geneset. Note that RP() function from **RandProd** package performs similar but not the same calculation; for more information about this package, look at the package manual [here](https://www.bioconductor.org/packages/release/bioc/vignettes/RankProd/inst/doc/RankProd.pdf). That's why we write our own codes to perform PR. This is simply done by multiplying gene ranks across studies. These are "*obsreved product of ranks*".
+```{r}
+PR <- as.numeric(merge_rank_t_up$rank_Deshiere)*
+    as.numeric(merge_rank_t_up$rank_Hesling)*
+    as.numeric(merge_rank_t_up$rank_Hills)*
+    as.numeric(merge_rank_t_up$rank_Keshamouni)* 
+    as.numeric(merge_rank_t_up$rank_Maupin)*
+    as.numeric(merge_rank_t_up$rank_Sun_A549)*
+    as.numeric(merge_rank_t_up$rank_Sun_HCC827)*
+    as.numeric(merge_rank_t_up$rank_Sun_NCI_H358)*
+    as.numeric(merge_rank_t_up$rank_Taube)*
+    as.numeric(merge_rank_t_up$rank_Walsh)
+
+## add a column to dataset that stores PR:
+merge_rank_t_up$PR<- PR
+
+## export the dataset that contains PR:
+ write.table(merge_rank_t_up, 
+            paste0(out_path, "10data_t_ranked_", upDown, "_PR.txt"), 
+            sep= "\t", row.names=FALSE, col.names=TRUE)
+head(merge_rank_t_up [, 75:82])
+```
+We should then perform permutation test to see how likely it is to obtain a specific PR under null distribution (if no genes were differentially expressed). We permute over the ranks in eac dataset to generate random PRs. Then, by comparing the observed and the permuted PR we can calculate FDR. Usually we perform >1000 times permutations, however, as it is computationally extensive, we will do this for 50 time. Note that again, we need to do the same thing for down-regulaed geneset later. Function *replicate()* with *sample()* can be used for this step. Because the *sample()* function, randomly samples from a vector, we also should set the seed, so we guarantee that the results are reproducible.
+
+Here we perform permutation for up-geneset. 
+```{r}
+B=100
+out_path<- "./out/"
+upDown<- "up"
+
+data<- read.table(paste(out_path, "10data_t_ranked_", upDown, "_PR.txt", sep=""), 
+                  header=TRUE, sep= "\t")
+
+ranks<- data[, grepl("rank", colnames(data))]
+
+# For each of the columns in "ranks" which is a study, permute ranks and calculate PR for B times :
+
+set.seed(555)  ## we set the seed so we can make sure that the results rae reproducible.
+randRanks<- replicate(B, {
+  as.numeric(sample (ranks[,1], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,2], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,3], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,4], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,5], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,6], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,7], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,8], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,9], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,10], nrow(ranks), replace=FALSE))
+})
+
+## We transform the data to log scale as the distribution of PRs are skewed. 
+obs_PR<- log2(data[,"PR"])
+per_PR<- log2(randRanks)
+
+par(mar=c(6,6,3,1), mfrow=c(1,2))
+
+hist(data[, "PR"], col="light blue", breaks=100,
+     main="",
+     xlab= "Observed Product of Ranks")
+
+hist(obs_PR, col="light blue", breaks=100,
+     main= "",
+     xlab= "Log2 Observed Product of Ranks" )
+```
+Set a threshold for defining up-regulated DEGs.
+```{r}
+###------------------ Lower CIs:
+#lower 99.999% CI of permutate_PR:
+
+CI99.999 <- quantile(per_PR, probs= 0.000005) 
+
+##-------------------- how many genes less than the threshold (CI) exist by chance in per-PR?
+
+sum(per_PR < CI99.999)/length(per_PR) #~ 5e-06    6/1190000 
+
+##-------------------- How many DEGs less than the threshold (CI) exist in obs-PR?
+sum(obs_PR <CI99.999) # 183
+
+DEG<- data[ log2(data$PR)<CI99.999, ] 
+
+write.table(DEG, 
+            paste(out_path, "DEG_10data_t_", upDown, "_log2Less_CI99.999.txt", sep=""), 
+            sep= "\t", row.names=FALSE, col.names=TRUE)
+```
+Look at the observed and permuted PRs. 
+```{r}
+par(mar=c(6,6,3,1))
+hist(obs_PR, col="light blue", breaks=100,
+     main= "", prob= TRUE, las=1,
+     cex.lab=1.3, cex.axis=1.2,
+     xlab= paste("Log2 Observed Product of Ranks") )
+
+lines(density(per_PR), col="coral3", lwd=3)
+abline(v=CI99.999, col= "darkgreen", lty=2, lwd=3)
+```
+
+```{r}
+# Q-Q plot:
+qqplot(per_PR, obs_PR, xlab="log2 (Permuted PR)",
+       ylab="log2 (Observed PR)", main="Q-Q plot of the log2(PR)")
+abline(0,1, col="red")
+```
+
+
+### Obtaining down-regulated gene set:
+In the rest of the document, we do exactly the same pipeline to obtain the down-regulated gene set. 
+```{r}
+## delete everything we defined in the environment:
+rm(list=ls())
+
+rank_path_down<- "./out/t_down" 
+out_path<- "./out/"
+upDown<- "down"
+
+## we use multmerge function:
+multmerge = function(mypath){
+  filenames=list.files(path=mypath, full.names=TRUE)
+  datalist = lapply(filenames, function(x){read.table(file=x, header=T, sep="\t")})
+  Reduce(function(x,y) {merge(x,y, by= "EntrezID")}, datalist)}
+
+merge_rank_t_down<- multmerge(rank_path_down)  ## Don't worry about the warnings!
+names(merge_rank_t_down)
+```
+Change the column names based on studies:
+```{r}
+cols<- c("EntrezID", 
+         "probeID_Deshiere", "logFC_Deshiere", "t_Deshiere", "pval_Deshiere", 
+         "adj_pval_Deshiere", "B_Deshiere", "GeneSymbol_Deshiere", "rank_Deshiere", 
+         
+         "probeID_Hesling", "logFC_Hesling", "t_Hesling", "pval_Hesling", 
+         "adj_pval_Hesling", "B_Hesling", "GeneSymbol_Hesling", "rank_Hesling",
+         
+         "probeID_Hills", "logFC_Hills", "t_Hills", "pval_Hills", 
+         "adj_pval_Hills", "B_Hills", "GeneSymbol_Hills", "rank_Hills",
+         
+         "probeID_Keshamouni", "logFC_Keshamouni", "t_Keshamouni", "pval_Keshamouni", 
+         "adj_pval_Keshamouni", "B_Keshamouni", "GeneSymbol_Keshamouni", "rank_Keshamouni",
+         
+         "probeID_Maupin", "logFC_Maupin", "t_Maupin", "pval_Maupin", 
+         "adj_pval_Maupin", "B_Maupin", "GeneSymbol_Maupin", "rank_Maupin",
+         
+         "probeID_Sun_A549", "logFC_Sun_A549", "t_Sun_A549", "pval_Sun_A549",
+         "adj_pval_Sun_A549", "B_Sun_A549", "GeneSymbol_Sun_A549", "rank_Sun_A549",
+         
+         "probeID_Sun_HCC827", "logFC_Sun_HCC827", "t_Sun_HCC827", "pval_Sun_HCC827", 
+         "adj_pval_Sun_HCC827", "B_Sun_HCC827", "GeneSymbol_Sun_HCC827", "rank_Sun_HCC827",
+         
+         "probeID_Sun_NCI_H358", "logFC_Sun_NCI_H358", "t_Sun_NCI_H358", "pval_Sun_NCI_H358", 
+         "adj_pval_Sun_NCI_H358", "B_Sun_NCI_H358", "GeneSymbol_Sun_NCI_H358", "rank_Sun_NCI_H358",
+         
+         "probeID_Taube", "logFC_Taube", "t_Taube", "pval_Taube", 
+         "adj_pval_Taube", "B_Taube", "GeneSymbol_Taube", "rank_Taube",
+         
+         "probeID_Walsh", "logFC_Walsh", "t_Walsh", "pval_Walsh", 
+         "adj_pval_Walsh", "B_Walsh", "GeneSymbol_Walsh", "rank_Walsh")
+colnames(merge_rank_t_down)<- cols
+head(merge_rank_t_down,2)
+```
+
+Now, we perform product of rank for the down geneset. 
+```{r}
+PR <- as.numeric(merge_rank_t_down$rank_Deshiere)*
+    as.numeric(merge_rank_t_down$rank_Hesling)*
+    as.numeric(merge_rank_t_down$rank_Hills)*
+    as.numeric(merge_rank_t_down$rank_Keshamouni)* 
+    as.numeric(merge_rank_t_down$rank_Maupin)*
+    as.numeric(merge_rank_t_down$rank_Sun_A549)*
+    as.numeric(merge_rank_t_down$rank_Sun_HCC827)*
+    as.numeric(merge_rank_t_down$rank_Sun_NCI_H358)*
+    as.numeric(merge_rank_t_down$rank_Taube)*
+    as.numeric(merge_rank_t_down$rank_Walsh)
+
+## add a column to dataset that stores PR:
+merge_rank_t_down$PR<- PR
+
+## export the dataset that contains PR:
+ write.table(merge_rank_t_down, 
+            paste(out_path, "10data_t_ranked_", upDown, "_PR.txt", sep=""), 
+            sep= "\t", row.names=FALSE, col.names=TRUE)
+head(merge_rank_t_down [, 75:82],2)
+```
+Perform permutation test to see how likely it is to obtain a specific PR under null distribution (if no genes were differentially expressed).\ 
+Here we perform permutation for down-geneset. 
+```{r}
+B=100
+out_path<- "./out/"
+upDown<- "down"
+
+data<- read.table(paste(out_path, "10data_t_ranked_", upDown, "_PR.txt", sep=""), 
+                  header=TRUE, sep= "\t")
+
+ranks<- data[, grepl("rank", colnames(data))]
+
+# For each of the columns in "ranks" which is a study, permute ranks and calculate PR for B times :
+
+set.seed(555)  ## we set the seed so we can make sure that the results rae reproducible.
+randRanks<- replicate(B,{
+  as.numeric(sample(ranks[,1], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,2], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,3], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,4], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,5], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,6], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,7], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,8], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,9], nrow(ranks), replace=FALSE))*
+  as.numeric(sample(ranks[,10], nrow(ranks), replace=FALSE))
+})
+
+## We transform the data to log scale as the distribution of PRs are skewed. 
+obs_PR<- log2(data[,"PR"])
+per_PR<- log2(randRanks)
+
+par(mar=c(6,6,3,1), mfrow=c(1,2))
+
+hist(data[, "PR"], col="light blue", breaks=100,
+     main="",
+     xlab= "Observed Product of Ranks")
+
+hist(obs_PR, col="light blue", breaks=100,
+     main= "",
+     xlab= "Log2 Observed Product of Ranks" )
+```
+Set a threshold for defining DEGs.
+```{r}
+###------------------ Lower CIs:
+#lower 99.999% CI of permutate_PR:
+
+CI99.999 <- quantile(per_PR, probs= 0.000005) 
+
+##-------------------- how many genes less than the threshold (CI) exist by chance in per-PR?
+
+sum(per_PR <CI99.999)/length(per_PR) #~ 5e-06    6/1190000 
+
+##-------------------- How many DEGs less than the threshold (CI) exist in obs-PR?
+sum(obs_PR <CI99.999) # 90
+
+DEG<- data[log2(data$PR)<CI99.999,] 
+
+write.table(DEG, 
+            paste(out_path, "DEG_10data_t_", upDown, "_log2Less_CI99.999.txt", sep=""), 
+            sep= "\t", row.names=FALSE, col.names=TRUE)
+```
+Look at the observed and permuted PRs. 
+```{r}
+par(mar=c(6,6,3,1))
+hist(obs_PR, col="light blue", breaks=100,
+     main= "", prob= TRUE, las=1,
+     cex.lab=1.3, cex.axis=1.2,
+     xlab= paste("Log2 Observed Product of Ranks") )
+
+lines(density(per_PR), col="coral3", lwd=3)
+abline(v=CI99.999, col= "darkgreen", lty=2, lwd=3)
+```
+
+```{r}
+# Q-Q plot:
+qqplot(per_PR, obs_PR, xlab="log2 (Permuted PR)",
+       ylab="log2 (Observed PR)", main="Q-Q plot of the log2(PR)")
+abline(0,1, col="red")
+```
+
+
